@@ -35,6 +35,7 @@ type ChatHistory struct {
 
 // MemberEmbedding 向量记忆表 (member_embeddings) —— 长期记忆 (RAG 核心)
 // 注意：实际向量存储在 Pinecone，此处仅存储 VectorID 作为关联
+// 使用 NVIDIA llama-3_2-nemoretriever-300m-embed-v2 模型 (1024 维)
 type MemberEmbedding struct {
 	ID             uint      `gorm:"primaryKey" json:"id"`
 	VectorID       string    `gorm:"index" json:"vector_id"`           // Pinecone 中的向量 ID

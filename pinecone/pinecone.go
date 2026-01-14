@@ -24,7 +24,7 @@ func InitPinecone() {
 
 	indexName := os.Getenv("PINECONE_INDEX")
 	if indexName == "" {
-		indexName = "rag-bot" // 默认索引名
+		indexName = "gin-bot" // 默认索引名
 	}
 
 	var err error
@@ -53,4 +53,42 @@ func InitPinecone() {
 	} else {
 		fmt.Printf("Connected to Pinecone index: %s (Host: %s)\n", indexName, idx.Host)
 	}
+}
+
+// Upsert 将向量上传到 Pinecone
+func Upsert(ctx context.Context, id string, values []float32, metadata map[string]interface{}) error {
+	if PCIndex == nil {
+		return fmt.Errorf("pinecone index not connected")
+	}
+
+	_, err := PCIndex.UpsertVectors(ctx, []*pinecone.Vector{
+		{
+			Id:     id,
+			Values: values,
+		},
+	})
+	return err
+}
+
+// Query 在 Pinecone 中进行向量搜索
+func Query(ctx context.Context, vector []float32, topK uint32) ([]string, error) {
+	if PCIndex == nil {
+		return nil, fmt.Errorf("pinecone index not connected")
+	}
+
+	resp, err := PCIndex.QueryByVectorValues(ctx, &pinecone.QueryByVectorValuesRequest{
+		Vector: vector,
+		TopK:   topK,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []string
+	for _, match := range resp.Matches {
+		if match.Vector != nil {
+			ids = append(ids, match.Vector.Id)
+		}
+	}
+	return ids, nil
 }
