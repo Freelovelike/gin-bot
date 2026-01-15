@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
+
+	"gin-bot/config"
 
 	"github.com/pinecone-io/go-pinecone/pinecone"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -30,15 +31,8 @@ var (
 
 // InitPinecone 初始化 Pinecone 客户端
 func InitPinecone() {
-	apiKey := os.Getenv("PINECONE_API_KEY")
-	if apiKey == "" {
-		apiKey = "pcsk_6LPFmv_QtayH2cAfVq7ZVsozuTyeYfe7PeQimCnordjVSvwJLMUY4xrc4kzQj4cH8KtWRU"
-	}
-
-	indexName := os.Getenv("PINECONE_INDEX")
-	if indexName == "" {
-		indexName = "gin-bot"
-	}
+	apiKey := config.Cfg.PineconeAPIKey
+	indexName := config.Cfg.PineconeIndex
 
 	var err error
 	PCClient, err = pinecone.NewClient(pinecone.NewClientParams{
@@ -154,13 +148,3 @@ func QueryWithScore(ctx context.Context, namespace string, vector []float32, top
 	}
 	return matches, nil
 }
-
-// Upsert 兼容旧接口（默认 namespace）
-// func Upsert(ctx context.Context, id string, values []float32, metadata map[string]interface{}) error {
-// 	return UpsertToNamespace(ctx, "", id, values, metadata)
-// }
-
-// Query 兼容旧接口
-// func Query(ctx context.Context, vector []float32, topK uint32) ([]string, error) {
-// 	return QueryFromNamespace(ctx, "", vector, topK, nil)
-// }

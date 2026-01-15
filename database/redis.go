@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"time"
+
+	"gin-bot/config"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -14,19 +15,9 @@ var RDB *redis.Client
 
 // InitRedis 初始化 Redis 客户端
 func InitRedis() {
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-
-	password := os.Getenv("REDIS_PASSWORD")
-	if password == "" {
-		password = "hwc20010616"
-	}
-
 	RDB = redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
+		Addr:     config.Cfg.RedisAddr,
+		Password: config.Cfg.RedisPassword,
 		DB:       0,
 	})
 

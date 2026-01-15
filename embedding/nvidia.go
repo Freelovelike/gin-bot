@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"os"
+
+	"gin-bot/config"
 )
 
 const (
@@ -42,11 +42,6 @@ type EmbeddingResponse struct {
 // inputType: "query" 用于检索，"passage" 用于建立索引
 // targetDim: 目标维度，如果为 0 则返回原始维度（该模型默认为 2048）
 func GetEmbedding(text string, inputType string, targetDim int) ([]float32, error) {
-	apiKey := os.Getenv("NVIDIA_API_KEY")
-	if apiKey == "" {
-		apiKey = "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"
-	}
-
 	reqBody := EmbeddingRequest{
 		Input:     []string{text},
 		Model:     NVIDIA_MODEL,
@@ -65,15 +60,9 @@ func GetEmbedding(text string, inputType string, targetDim int) ([]float32, erro
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+config.Cfg.NvidiaAPIKey)
 
-	// 配置代理
-	proxyUrl, _ := url.Parse("http://127.0.0.1:7890")
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyUrl),
-		},
-	}
+	client := config.GetHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)

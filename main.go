@@ -2,13 +2,13 @@ package main
 
 import (
 	"log"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"gin-bot/config"
 	"gin-bot/database"
 	"gin-bot/pinecone"
 	"gin-bot/service"
@@ -32,15 +32,13 @@ func hasMeaningfulContent(content string) bool {
 	return utf8.RuneCountInString(cleaned) >= 5
 }
 
-// getEnv 获取环境变量，如果不存在则返回默认值
-func getEnv(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultValue
-}
-
 func main() {
+	// 强制设置全局时区为北京时间 (UTC+8)
+	time.Local = time.FixedZone("CST", 8*3600)
+
+	// 初始化配置
+	config.Init()
+
 	// 初始化数据库
 	database.InitDB()
 
@@ -65,13 +63,6 @@ func main() {
 			return false
 		})
 	})
-
-	// 从环境变量获取配置
-	botWSURL := getEnv("BOT_WS_URL", "ws://127.0.0.1:3001")
-	botToken := getEnv("BOT_TOKEN", "hwc20010616")
-
-	// 超级用户列表（用于 ZeroBot 配置）
-	superUsers := []int64{3144622944}
 
 	// 注册一个简单的 hello 命令作为示例
 	zero.OnCommand("hello").Handle(func(ctx *zero.Ctx) {
@@ -114,8 +105,9 @@ func main() {
 			}
 
 			isPrivate := ctx.Event.MessageType == "private"
+			userID := ctx.Event.UserID
 			go func() {
-				reply, err := service.GetAIResponseWithFC(prompt, groupID, isSuperUser)
+				reply, err := service.GetAIResponseWithFC(prompt, groupID, userID, isSuperUser)
 				if err != nil {
 					log.Printf("[Chat] AI Response Error: %v", err)
 					if service.IsBotActive(groupID) {
@@ -143,7 +135,7 @@ func main() {
 				// 尝试获取主动回复
 				go func() {
 					// 这个函数会内部判断 RAG 匹配分和语义触发
-					reply, shouldReply := service.GetProactiveResponse(content, groupID)
+					reply, shouldReply := service.GetProactiveResponse(content, groupID, userID)
 					if shouldReply && reply != "" {
 						proactiveCooldown[groupID] = time.Now()
 						ctx.Send(cleanCQCodes(reply))
@@ -172,9 +164,9 @@ func main() {
 	zero.RunAndBlock(&zero.Config{
 		NickName:      []string{"bot"},
 		CommandPrefix: "/",
-		SuperUsers:    superUsers,
+		SuperUsers:    config.Cfg.SuperUsers,
 		Driver: []zero.Driver{
-			driver.NewWebSocketClient(botWSURL, botToken),
+			driver.NewWebSocketClient(config.Cfg.BotWSURL, config.Cfg.BotToken),
 		},
 	}, nil)
 }

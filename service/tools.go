@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"gin-bot/database"
 	"gin-bot/models"
 	"time"
@@ -105,11 +106,33 @@ var AvailableTools = []Tool{
 			"required": []string{"type", "content"},
 		},
 	},
+	{
+		Name:        "list_timer_tasks",
+		Description: "列出当前用户在本群设置的所有活跃定时提醒和周期闹钟。当用户想看自己设了哪些闹钟、想管理提醒时调用。",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
+	{
+		Name:        "remove_timer_task",
+		Description: "取消或删除指定的定时任务。需要提供任务 ID。建议先调用 list_timer_tasks 获取 ID。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{
+					"type":        "string",
+					"description": "要删除的任务 ID（如 task_123456...）。",
+				},
+			},
+			"required": []string{"id"},
+		},
+	},
 }
 
 // ExecuteTool 执行指定的工具（带权限检查）
 // isSuperUser: 由调用方使用 ZeroBot 的 ctx.Event.IsSuperUser() 判断后传入
-func ExecuteTool(toolName string, args map[string]interface{}, groupID int64, isSuperUser bool) ToolResult {
+func ExecuteTool(toolName string, args map[string]interface{}, groupID int64, userID int64, isSuperUser bool) ToolResult {
 	// 检查工具是否需要管理员权限
 	for _, tool := range AvailableTools {
 		if tool.Name == toolName && tool.RequireAdmin {
@@ -130,14 +153,18 @@ func ExecuteTool(toolName string, args map[string]interface{}, groupID int64, is
 	case "get_rag_status":
 		return executeGetRAGStatus(groupID)
 	case "add_timer_task":
-		return executeAddTimerTask(args, groupID)
+		return executeAddTimerTask(args, groupID, userID)
+	case "list_timer_tasks":
+		return executeListTimerTasks(groupID, userID, isSuperUser)
+	case "remove_timer_task":
+		return executeRemoveTimerTask(args)
 	default:
 		return ToolResult{Success: false, Message: "未知的工具: " + toolName}
 	}
 }
 
 // executeAddTimerTask 添加定时任务
-func executeAddTimerTask(args map[string]interface{}, groupID int64) ToolResult {
+func executeAddTimerTask(args map[string]interface{}, groupID int64, userID int64) ToolResult {
 	taskType, _ := args["type"].(string)
 	content, _ := args["content"].(string)
 
@@ -145,6 +172,7 @@ func executeAddTimerTask(args map[string]interface{}, groupID int64) ToolResult 
 		Type:    taskType,
 		Content: content,
 		GroupID: groupID,
+		UserID:  userID, // 记录下任务的用户 ID
 	}
 
 	if taskType == "once" {
@@ -165,7 +193,56 @@ func executeAddTimerTask(args map[string]interface{}, groupID int64) ToolResult 
 		return ToolResult{Success: false, Message: "设置提醒失败: " + err.Error()}
 	}
 
-	return ToolResult{Success: true, Message: "设置成功！到时间我会提醒你的~"}
+	return ToolResult{Success: true, Message: "设置成功！到时间我会提醒你的~ ID: " + task.ID}
+}
+
+// executeListTimerTasks 列出任务
+func executeListTimerTasks(groupID int64, userID int64, isSuperUser bool) ToolResult {
+	queryUserID := userID
+	if isSuperUser {
+		queryUserID = 0 // 超级用户查询全量
+	}
+
+	tasks := ListTasks(groupID, queryUserID)
+	if len(tasks) == 0 {
+		return ToolResult{Success: true, Message: "目前没有设置任何活跃的任务哦。"}
+	}
+
+	msg := "你当前的定时任务如下：\n"
+	if isSuperUser {
+		msg = "本群当前活跃的定时任务如下（超级用户视图）：\n"
+	}
+
+	for _, t := range tasks {
+		timeStr := ""
+		if t.Type == "once" {
+			timeStr = time.Unix(t.TargetAt, 0).Format("2006-01-02 15:04:05")
+		} else {
+			timeStr = "周期性: " + t.TimeExpr
+		}
+
+		userLabel := ""
+		if isSuperUser {
+			userLabel = fmt.Sprintf(" [用户:%d]", t.UserID)
+		}
+
+		msg += fmt.Sprintf("- [%s] %s (%s)%s\n", t.ID, t.Content, timeStr, userLabel)
+	}
+	return ToolResult{Success: true, Message: msg, Data: tasks}
+}
+
+// executeRemoveTimerTask 移除任务
+func executeRemoveTimerTask(args map[string]interface{}) ToolResult {
+	id, ok := args["id"].(string)
+	if !ok || id == "" {
+		return ToolResult{Success: false, Message: "移除失败：请提供有效的任务 ID"}
+	}
+
+	if err := RemoveTask(id); err != nil {
+		return ToolResult{Success: false, Message: "取消任务失败: " + err.Error()}
+	}
+
+	return ToolResult{Success: true, Message: "成功取消了该任务！"}
 }
 
 // executeToggleBot 开关机器人

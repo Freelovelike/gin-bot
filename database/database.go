@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"gin-bot/config"
 	"gin-bot/models"
 
 	"gorm.io/driver/postgres"
@@ -15,19 +16,9 @@ import (
 
 var DB *gorm.DB
 
-// getEnv 获取环境变量，如果不存在则返回默认值
-func getEnv(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultValue
-}
-
 // InitDB 初始化数据库连接
 func InitDB() {
-	// 获取数据库配置
-	_ = getEnv("DB_DRIVER", "postgres") // 预留驱动选择逻辑
-	dsn := getEnv("DB_DSN", "postgres://freelove:hwc20010616@localhost:5432/go_demo?sslmode=disable")
+	dsn := config.Cfg.DBDSN
 
 	// 配置 GORM Logger，忽略 RecordNotFound 错误
 	gormLogger := logger.New(

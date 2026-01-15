@@ -8,13 +8,12 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"gin-bot/config"
 	"gin-bot/database"
 	"gin-bot/embedding"
 	"gin-bot/models"
@@ -45,11 +44,6 @@ func classifyWithRegex(content string) string {
 // classifyWithAI 使用轻量 AI 判断消息类型并探测主动性触发点
 // 返回格式: 类型|是否主动频率(true/false)|原因
 func classifyWithAI(content string) string {
-	apiKey := os.Getenv("NVIDIA_API_KEY")
-	if apiKey == "" {
-		apiKey = "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"
-	}
-
 	prompt := fmt.Sprintf(`你是一个深度社交观察员。分析以下群聊消息并给出分类。
 
 ### 分类规则：
@@ -77,19 +71,20 @@ func classifyWithAI(content string) string {
 		"temperature": 0.1,
 	}
 
-	jsonData, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", NVIDIA_CHAT_URL, bytes.NewBuffer(jsonData))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	proxyUrl, _ := url.Parse("http://127.0.0.1:7890")
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyUrl),
-		},
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return classifyWithRegex(content) + "|false|marshal_error"
 	}
 
+	req, err := http.NewRequest("POST", NVIDIA_CHAT_URL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return classifyWithRegex(content) + "|false|request_error"
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+config.Cfg.NvidiaAPIKey)
+
+	client := config.GetHTTPClientWithTimeout(5 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[Classifier] AI request failed: %v", err)
@@ -161,11 +156,11 @@ func SaveMessageToRAG(qq string, nickname string, groupID int64, content string)
 		go func() {
 			userIDInt, _ := strconv.ParseInt(qq, 10, 64)
 			task := ScheduledTask{
-				ID:      fmt.Sprintf("proactive_%d", time.Now().Unix()),
-				Type:    "once",
-				Content: proactiveReason + "|" + content, // 传入原因和原始消息
-				GroupID: groupID,
-				UserID:  userIDInt,
+				ID:       fmt.Sprintf("proactive_%d", time.Now().Unix()),
+				Type:     "once",
+				Content:  proactiveReason + "|" + content, // 传入原因和原始消息
+				GroupID:  groupID,
+				UserID:   userIDInt,
 				TargetAt: time.Now().Add(4 * time.Hour).Unix(),
 			}
 			err := AddTask(task)

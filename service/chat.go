@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"gin-bot/config"
 	"gin-bot/database"
 	"gin-bot/embedding"
 	"gin-bot/models"
@@ -131,7 +131,7 @@ func GetAIResponse(userPrompt string) (string, error) {
 }
 
 // GetProactiveResponse 主动插嘴判断逻辑
-func GetProactiveResponse(userPrompt string, groupID int64) (string, bool) {
+func GetProactiveResponse(userPrompt string, groupID int64, userID int64) (string, bool) {
 	queryVec, err := embedding.GetEmbedding(userPrompt, "query", 1024)
 	if err != nil {
 		return "", false
@@ -143,7 +143,11 @@ func GetProactiveResponse(userPrompt string, groupID int64) (string, bool) {
 	maxScore := float32(0.0)
 	var bestMatch models.MemberEmbedding
 
-	pMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespacePersonal, queryVec, 1, nil)
+	// 检索个人信息 (NamespacePersonal) - 强制 ID 隔离
+	pFilter := map[string]interface{}{
+		"user_qq": strconv.FormatInt(userID, 10),
+	}
+	pMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespacePersonal, queryVec, 1, pFilter)
 	if len(pMatches) > 0 && pMatches[0].Score > maxScore {
 		maxScore = pMatches[0].Score
 		database.DB.Preload("RefMsg").Where("vector_id = ?", pMatches[0].ID).First(&bestMatch)
@@ -165,8 +169,7 @@ func GetProactiveResponse(userPrompt string, groupID int64) (string, bool) {
 	contextBlock := fmt.Sprintf("【突然想起的事】: (%s前) %s", relTime, bestMatch.ContentSummary)
 
 	now := time.Now()
-	bjTime := now.In(time.FixedZone("CST", 8*3600))
-	timeInfo := fmt.Sprintf("【北京时间：%s】", bjTime.Format("2006-01-02 15:04"))
+	timeInfo := fmt.Sprintf("【北京时间：%s】", now.Format("2006-01-02 15:04"))
 
 	systemPrompt := fmt.Sprintf(`你是"小黄"，一个资深群友。你刚才在偷听大家聊天，突然想起了一件非常相关的事，忍不住想插句嘴。
 
@@ -194,11 +197,6 @@ func GetProactiveResponse(userPrompt string, groupID int64) (string, bool) {
 }
 
 func callNvidiaAPI(messages []ChatMessage, model string) (string, error) {
-	apiKey := os.Getenv("NVIDIA_API_KEY")
-	if apiKey == "" {
-		apiKey = "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"
-	}
-
 	reqBody := map[string]interface{}{
 		"model":       model,
 		"messages":    messages,
@@ -206,19 +204,20 @@ func callNvidiaAPI(messages []ChatMessage, model string) (string, error) {
 		"max_tokens":  1024,
 	}
 
-	jsonData, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", NVIDIA_CHAT_URL, bytes.NewBuffer(jsonData))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	proxyUrl, _ := url.Parse("http://127.0.0.1:7890")
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyUrl),
-		},
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
 	}
 
+	req, err := http.NewRequest("POST", NVIDIA_CHAT_URL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+config.Cfg.NvidiaAPIKey)
+
+	client := config.GetHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err

@@ -8,11 +8,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"gin-bot/config"
 	"gin-bot/database"
 	"gin-bot/embedding"
 	"gin-bot/models"
@@ -74,13 +74,9 @@ type FCToolCall struct {
 }
 
 // GetAIResponseWithFC 带 Function Calling 能力的 AI 回复 (集成时间感与动态变脸)
-func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (string, error) {
+func GetAIResponseWithFC(userPrompt string, groupID int64, userID int64, isSuperUser bool) (string, error) {
 	now := time.Now()
-	bjTime := now.In(time.FixedZone("CST", 8*3600))
-	weekdayMap := map[string]string{
-		"Monday": "一", "Tuesday": "二", "Wednesday": "三", "Thursday": "四", "Friday": "五", "Saturday": "六", "Sunday": "日",
-	}
-	timeInfo := fmt.Sprintf("【北京时间：%s 星期%s】", bjTime.Format("2006-01-02 15:04"), weekdayMap[bjTime.Weekday().String()])
+	timeInfo := fmt.Sprintf("【北京时间：%s】", now.Format("2006-01-02 15:04"))
 
 	// 1. RAG 双 namespace 检索
 	contextTexts := []string{}
@@ -93,8 +89,11 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// 检索个人信息 (NamespacePersonal)
-		pMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespacePersonal, queryVec, 3, nil)
+		// 检索个人信息 (NamespacePersonal) - 强制 ID 隔离
+		pFilter := map[string]interface{}{
+			"user_qq": strconv.FormatInt(userID, 10),
+		}
+		pMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespacePersonal, queryVec, 3, pFilter)
 		for _, m := range pMatches {
 			if m.Score > 0.7 {
 				isPersonalScene = true
@@ -191,11 +190,6 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 		{Role: "user", Content: userPrompt},
 	}
 
-	apiKey := os.Getenv("NVIDIA_API_KEY")
-	if apiKey == "" {
-		apiKey = "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"
-	}
-
 	reqBody := FCChatRequest{
 		Model:       NVIDIA_FC_MODEL,
 		Messages:    messages,
@@ -220,17 +214,10 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+config.Cfg.NvidiaAPIKey)
 	req.Header.Set("Accept", "application/json")
 
-	proxyUrl, _ := url.Parse("http://127.0.0.1:7890")
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyUrl),
-		},
-	}
-
+	client := config.GetHTTPClientWithTimeout(120 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -255,7 +242,7 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 
 	// 6. 检查是否有工具调用
 	if len(choice.Message.ToolCalls) > 0 {
-		return handleToolCalls(choice.Message.ToolCalls, messages, groupID, isSuperUser, apiKey, client)
+		return handleToolCalls(choice.Message.ToolCalls, messages, groupID, userID, isSuperUser, client)
 	}
 
 	// 7. 直接返回内容
@@ -267,7 +254,7 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 }
 
 // handleToolCalls 处理工具调用
-func handleToolCalls(toolCalls []FCToolCall, messages []ChatMessage, groupID int64, isSuperUser bool, apiKey string, client *http.Client) (string, error) {
+func handleToolCalls(toolCalls []FCToolCall, messages []ChatMessage, groupID int64, userID int64, isSuperUser bool, client *http.Client) (string, error) {
 	// 执行所有工具调用
 	toolResults := []struct {
 		ToolCallID string
@@ -289,7 +276,7 @@ func handleToolCalls(toolCalls []FCToolCall, messages []ChatMessage, groupID int
 		}
 
 		// 执行工具（带权限检查）
-		result := ExecuteTool(tc.Function.Name, args, groupID, isSuperUser)
+		result := ExecuteTool(tc.Function.Name, args, groupID, userID, isSuperUser)
 		log.Printf("[FC] Tool result: %+v", result)
 
 		toolResults = append(toolResults, struct {
@@ -336,7 +323,7 @@ func handleToolCalls(toolCalls []FCToolCall, messages []ChatMessage, groupID int
 	jsonData, _ := json.Marshal(reqBody)
 	req, _ := http.NewRequest("POST", NVIDIA_CHAT_URL, bytes.NewBuffer(jsonData))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+config.Cfg.NvidiaAPIKey)
 
 	resp, err := client.Do(req)
 	if err != nil {
