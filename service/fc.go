@@ -73,8 +73,15 @@ type FCToolCall struct {
 	} `json:"function"`
 }
 
-// GetAIResponseWithFC 带 Function Calling 能力的 AI 回复 (集成小黄人设与动态变脸)
+// GetAIResponseWithFC 带 Function Calling 能力的 AI 回复 (集成时间感与动态变脸)
 func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (string, error) {
+	now := time.Now()
+	bjTime := now.In(time.FixedZone("CST", 8*3600))
+	weekdayMap := map[string]string{
+		"Monday": "一", "Tuesday": "二", "Wednesday": "三", "Thursday": "四", "Friday": "五", "Saturday": "六", "Sunday": "日",
+	}
+	timeInfo := fmt.Sprintf("【北京时间：%s 星期%s】", bjTime.Format("2006-01-02 15:04"), weekdayMap[bjTime.Weekday().String()])
+
 	// 1. RAG 双 namespace 检索
 	contextTexts := []string{}
 	isTechScene := false
@@ -96,22 +103,28 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 				maxScore = m.Score
 			}
 			var res models.MemberEmbedding
-			database.DB.Where("vector_id = ?", m.ID).First(&res)
+			database.DB.Preload("RefMsg").Where("vector_id = ?", m.ID).First(&res)
 			if res.ContentSummary != "" {
-				contextTexts = append(contextTexts, res.ContentSummary)
+				relTime := formatRelativeTime(res.RefMsg.CreatedAt)
+				contextTexts = append(contextTexts, fmt.Sprintf("(%s前) %s", relTime, res.ContentSummary))
 			}
 		}
 
 		// 检索聊天记录 (NamespaceChat)
-		cMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespaceChat, queryVec, 3, nil)
+		chatFilter := map[string]interface{}{
+			"group_id": groupID,
+		}
+		cMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespaceChat, queryVec, 3, chatFilter)
 		for _, m := range cMatches {
 			if m.Score > maxScore {
 				maxScore = m.Score
 			}
 			var res models.MemberEmbedding
-			database.DB.Where("vector_id = ?", m.ID).First(&res)
+			database.DB.Preload("RefMsg").Where("vector_id = ?", m.ID).First(&res)
 			if res.ContentSummary != "" {
-				contextTexts = append(contextTexts, res.ContentSummary)
+				relTime := formatRelativeTime(res.RefMsg.CreatedAt)
+				contextTexts = append(contextTexts, fmt.Sprintf("(%s前) %s", relTime, res.ContentSummary))
+
 				lowContent := strings.ToLower(res.ContentSummary)
 				if strings.Contains(lowContent, "err") || strings.Contains(lowContent, "code") || strings.Contains(lowContent, "api") || strings.Contains(lowContent, "func") {
 					isTechScene = true
@@ -120,7 +133,7 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 		}
 	}
 
-	// 2. 构建系统 Prompt (小黄人设 + 动态变脸)
+	// 2. 构建系统 Prompt (小黄人设 + 动态变脸 + 时间感)
 	var contextBlock string
 	if len(contextTexts) > 0 {
 		contextBlock = "【脑海中的回忆片段】:\n" + strings.Join(contextTexts, "\n")
@@ -132,7 +145,7 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 	if isTechScene {
 		vibePrompt = "\n**[🔧 技术场景适配]**：现在像一个热心的技术大佬在帮群友排查 Bug 一样，直接指出重点，可以带点技术圈的吐槽，但要保证准确简练。"
 	} else if isPersonalScene {
-		vibePrompt = "\n**[💝 情感场景适配]**：回想起这位老朋友的私事了，用更多的同理和理解来回复。添加一些相关的例子或生活经验，让回复充满温度。"
+		vibePrompt = "\n**[💝 情感场景适配]**：回想起这位老朋友的私事了，用更多的同情和理解来回复。添加一些相关的例子或生活经验，让回复充满温度。"
 	}
 
 	if maxScore > 0.85 {
@@ -142,7 +155,8 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 	}
 
 	systemPrompt := fmt.Sprintf(`你是"小黄"，一个混迹在群聊里的资深群友。你真心把群友当朋友，说话自然。
-你可以使用工具来执行操作（如开关机器人、查询状态），也可以直接回答问题。
+%s
+你可以使用工具来执行操作（如开关机器人、查询状态、甚至设置未来提醒），也可以直接回答问题。
 
 %s
 %s
@@ -155,7 +169,8 @@ func GetAIResponseWithFC(userPrompt string, groupID int64, isSuperUser bool) (st
 ### 规则：
 1. 如果用户意图明确需要工具，请调用对应工具
 2. 绝对不要说"根据信息""检索结果"这种话！要把背景信息当作你自己的记忆。
-3. 保持像朋友边喝奶茶边聊天一样自然。`, contextBlock, vibePrompt)
+3. 保持像朋友边喝奶茶边聊天一样自然。
+4. 如果回忆里有几天前或几小时前的细节，请自然地在回复中体现出来，展现你有极好的记性。`, timeInfo, contextBlock, vibePrompt)
 
 	// 3. 转换工具格式
 	fcTools := make([]FCTool, len(AvailableTools))

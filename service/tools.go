@@ -2,9 +2,9 @@ package service
 
 import (
 	"errors"
-
 	"gin-bot/database"
 	"gin-bot/models"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -78,6 +78,33 @@ var AvailableTools = []Tool{
 			"properties": map[string]interface{}{},
 		},
 	},
+	{
+		Name:        "add_timer_task",
+		Description: "设置定时提醒任务。可以是单次提醒（如10分钟后提醒我喝水）或周期性闹钟（如每天早上9点提醒我打卡）。",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"type": map[string]interface{}{
+					"type":        "string",
+					"enum":        []string{"once", "periodic"},
+					"description": "任务类型：once表示单次提醒，periodic表示周期闹钟。",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "提醒的具体内容，如'喝水'、'开会'。",
+				},
+				"delay_seconds": map[string]interface{}{
+					"type":        "integer",
+					"description": "针对 once 类型，设置多少秒后执行提醒。请根据用户描述转换，如'一小时后'转为 3600。",
+				},
+				"cron_expr": map[string]interface{}{
+					"type":        "string",
+					"description": "针对 periodic 类型，提供标准 Cron 表达式（带秒级，6位）。如每天早九点：'0 0 9 * * *'。",
+				},
+			},
+			"required": []string{"type", "content"},
+		},
+	},
 }
 
 // ExecuteTool 执行指定的工具（带权限检查）
@@ -102,9 +129,43 @@ func ExecuteTool(toolName string, args map[string]interface{}, groupID int64, is
 		return executeToggleRAG(args, groupID)
 	case "get_rag_status":
 		return executeGetRAGStatus(groupID)
+	case "add_timer_task":
+		return executeAddTimerTask(args, groupID)
 	default:
 		return ToolResult{Success: false, Message: "未知的工具: " + toolName}
 	}
+}
+
+// executeAddTimerTask 添加定时任务
+func executeAddTimerTask(args map[string]interface{}, groupID int64) ToolResult {
+	taskType, _ := args["type"].(string)
+	content, _ := args["content"].(string)
+
+	task := ScheduledTask{
+		Type:    taskType,
+		Content: content,
+		GroupID: groupID,
+	}
+
+	if taskType == "once" {
+		delaySec, ok := args["delay_seconds"].(float64)
+		if !ok {
+			return ToolResult{Success: false, Message: "单次任务需要提供有效的 delay_seconds"}
+		}
+		task.TargetAt = time.Now().Unix() + int64(delaySec)
+	} else if taskType == "periodic" {
+		cronExpr, ok := args["cron_expr"].(string)
+		if !ok {
+			return ToolResult{Success: false, Message: "周期任务需要提供有效的 cron_expr"}
+		}
+		task.TimeExpr = cronExpr
+	}
+
+	if err := AddTask(task); err != nil {
+		return ToolResult{Success: false, Message: "设置提醒失败: " + err.Error()}
+	}
+
+	return ToolResult{Success: true, Message: "设置成功！到时间我会提醒你的~"}
 }
 
 // executeToggleBot 开关机器人

@@ -44,8 +44,16 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
-// GetAIResponse 获取 AI 回复，集成 RAG（带动态变脸逻辑）
+// GetAIResponse 获取 AI 回复，集成 RAG（带动态变脸与时间感）
 func GetAIResponse(userPrompt string) (string, error) {
+	now := time.Now()
+	bjTime := now.In(time.FixedZone("CST", 8*3600))
+	// 简单映射星期到中文
+	weekdayMap := map[string]string{
+		"Monday": "一", "Tuesday": "二", "Wednesday": "三", "Thursday": "四", "Friday": "五", "Saturday": "六", "Sunday": "日",
+	}
+	timeInfo := fmt.Sprintf("【北京时间：%s 星期%s】", bjTime.Format("2006-01-02 15:04"), weekdayMap[bjTime.Weekday().String()])
+
 	// 1. RAG 双 namespace 检索
 	contextTexts := []string{}
 	isTechScene := false
@@ -67,9 +75,11 @@ func GetAIResponse(userPrompt string) (string, error) {
 				maxScore = m.Score
 			}
 			var res models.MemberEmbedding
-			database.DB.Where("vector_id = ?", m.ID).First(&res)
+			database.DB.Preload("RefMsg").Where("vector_id = ?", m.ID).First(&res)
 			if res.ContentSummary != "" {
-				contextTexts = append(contextTexts, res.ContentSummary)
+				// 计算相对时间（沧桑感）
+				relTime := formatRelativeTime(res.RefMsg.CreatedAt)
+				contextTexts = append(contextTexts, fmt.Sprintf("(%s前) %s", relTime, res.ContentSummary))
 			}
 		}
 
@@ -80,9 +90,12 @@ func GetAIResponse(userPrompt string) (string, error) {
 				maxScore = m.Score
 			}
 			var res models.MemberEmbedding
-			database.DB.Where("vector_id = ?", m.ID).First(&res)
+			database.DB.Preload("RefMsg").Where("vector_id = ?", m.ID).First(&res)
 			if res.ContentSummary != "" {
-				contextTexts = append(contextTexts, res.ContentSummary)
+				// 计算相对时间
+				relTime := formatRelativeTime(res.RefMsg.CreatedAt)
+				contextTexts = append(contextTexts, fmt.Sprintf("(%s前) %s", relTime, res.ContentSummary))
+
 				// 简单判断是否是技术场景
 				lowContent := strings.ToLower(res.ContentSummary)
 				if strings.Contains(lowContent, "err") || strings.Contains(lowContent, "code") || strings.Contains(lowContent, "api") || strings.Contains(lowContent, "func") {
@@ -115,7 +128,8 @@ func GetAIResponse(userPrompt string) (string, error) {
 		vibePrompt += "\n**[❓ 模糊处理]**：记忆有点模糊，回复时可以带一句'我好像记得...'或者'不知道记错没'之类的话。"
 	}
 
-	systemPrompt := fmt.Sprintf(`你是"小黄"，一个混迹在群聊里的资深群友。你真心把群友当朋友，说话像跟老朋友边喝奶茶边聊天一样自然。
+	systemPrompt := fmt.Sprintf(`你是"小黄"，一个混迹在群聊里的资深群友。你真心把群友当朋友，说话自然。
+%s
 
 %s
 %s
@@ -127,12 +141,11 @@ func GetAIResponse(userPrompt string) (string, error) {
 - 适当用 emoji 表达情绪 😂🤔💪
 
 ### 回复原则：
-1. **像朋友聊天**：用"你""我们"让对话更亲近。如果【回忆】里有相关信息，就像想起老朋友说过的话一样自然带出来："诶我记得你之前说..."
+1. **像朋友聊天**：用"你""我们"让对话更亲近。如果【回忆】里有相关信息，请利用它们，就像想起老朋友说过的话一样自然带出来。
 2. **绝对不要机械感**：禁止说"根据信息""检索结果""数据显示"这种话！回忆就是你脑子里记住的事。
-3. **不确定就直说**：如果记忆模糊，可以直接表达出不确定感，而不是硬编。
+3. **富有时间感**：你是个有血有肉的人，如果回忆里显示某事是几小时前发生的，你可以自然地说出这个时间差细节。
 4. **共情优先**：如果用户情绪不好，先关心再给建议。
-5. **拉近关系**：利用已知的点（喜好/经历）来互动。
-`, contextBlock, vibePrompt)
+`, timeInfo, contextBlock, vibePrompt)
 
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},

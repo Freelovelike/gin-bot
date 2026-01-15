@@ -49,6 +49,18 @@ func main() {
 	// 初始化 Pinecone
 	pinecone.InitPinecone()
 
+	// 初始化调度器（时间感 - 未来感）
+	service.InitScheduler(func(groupID int64, userID int64, content string) {
+		zero.RangeBot(func(id int64, ctx *zero.Ctx) bool {
+			if groupID != 0 {
+				ctx.SendGroupMessage(groupID, content)
+			} else {
+				ctx.SendPrivateMessage(userID, content)
+			}
+			return false
+		})
+	})
+
 	// 从环境变量获取配置
 	botWSURL := getEnv("BOT_WS_URL", "ws://127.0.0.1:3001")
 	botToken := getEnv("BOT_TOKEN", "hwc20010616")
