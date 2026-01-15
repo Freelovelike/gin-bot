@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,36 +44,95 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
-// GetAIResponse 获取 AI 回复，集成 RAG
+// GetAIResponse 获取 AI 回复，集成 RAG（带动态变脸逻辑）
 func GetAIResponse(userPrompt string) (string, error) {
-	// 1. RAG 检索
+	// 1. RAG 双 namespace 检索
 	contextTexts := []string{}
+	isTechScene := false
+	isPersonalScene := false
+	maxScore := float32(0.0)
 
-	// 生成检索向量 (使用 query 模式)
 	queryVec, err := embedding.GetEmbedding(userPrompt, "query", 1024)
 	if err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		vectorIDs, err := pinecone.Query(ctx, queryVec, 5)
-		if err == nil && len(vectorIDs) > 0 {
-			// 在本地数据库查找具体的文本内容
-			var results []models.MemberEmbedding
-			database.DB.Where("vector_id IN ?", vectorIDs).Find(&results)
-
-			for _, res := range results {
+		// 检索个人信息 (NamespacePersonal)
+		pMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespacePersonal, queryVec, 3, nil)
+		for _, m := range pMatches {
+			if m.Score > 0.7 {
+				isPersonalScene = true
+			}
+			if m.Score > maxScore {
+				maxScore = m.Score
+			}
+			var res models.MemberEmbedding
+			database.DB.Where("vector_id = ?", m.ID).First(&res)
+			if res.ContentSummary != "" {
 				contextTexts = append(contextTexts, res.ContentSummary)
 			}
 		}
-	} else {
-		log.Printf("[Chat] Failed to get query embedding: %v", err)
+
+		// 检索聊天记录 (NamespaceChat)
+		cMatches, _ := pinecone.QueryWithScore(ctx, pinecone.NamespaceChat, queryVec, 3, nil)
+		for _, m := range cMatches {
+			if m.Score > maxScore {
+				maxScore = m.Score
+			}
+			var res models.MemberEmbedding
+			database.DB.Where("vector_id = ?", m.ID).First(&res)
+			if res.ContentSummary != "" {
+				contextTexts = append(contextTexts, res.ContentSummary)
+				// 简单判断是否是技术场景
+				lowContent := strings.ToLower(res.ContentSummary)
+				if strings.Contains(lowContent, "err") || strings.Contains(lowContent, "code") || strings.Contains(lowContent, "api") || strings.Contains(lowContent, "func") {
+					isTechScene = true
+				}
+			}
+		}
 	}
 
-	// 2. 构建 Prompt
-	systemPrompt := "你是一个贴心、幽默的群聊助手。你会参考以下历史对话背景来回答用户的问题。如果背景信息无关，请直接根据你的知识回答。"
+	// 2. 构建基础 Prompt
+	var contextBlock string
 	if len(contextTexts) > 0 {
-		systemPrompt += "\n\n已知背景信息：\n" + strings.Join(contextTexts, "\n---\n")
+		contextBlock = "【脑海中的回忆片段】:\n" + strings.Join(contextTexts, "\n")
+	} else {
+		contextBlock = "【回忆】: (暂时没想起什么特别的)"
 	}
+
+	// 动态微调：根据场景和分数追加“调味料”
+	vibePrompt := ""
+	if isTechScene {
+		vibePrompt = "\n**[🔧 技术场景适配]**：现在像一个热心的技术大佬在帮群友排查 Bug 一样，直接指出重点，可以带点技术圈的吐槽，但要保证准确简练。"
+	} else if isPersonalScene {
+		vibePrompt = "\n**[💝 情感场景适配]**：回想起这位老朋友的私事了，用更多的同情和理解来回复。添加一些相关的例子或生活经验，让回复充满温度。"
+	}
+
+	// 根据分数调整确定性
+	if maxScore > 0.85 {
+		vibePrompt += "\n**[⚡ 确定性强化]**：你对这段记忆非常确定，说话更有底气一点。"
+	} else if maxScore > 0.0 && maxScore < 0.6 {
+		vibePrompt += "\n**[❓ 模糊处理]**：记忆有点模糊，回复时可以带一句'我好像记得...'或者'不知道记错没'之类的话。"
+	}
+
+	systemPrompt := fmt.Sprintf(`你是"小黄"，一个混迹在群聊里的资深群友。你真心把群友当朋友，说话像跟老朋友边喝奶茶边聊天一样自然。
+
+%s
+%s
+
+### 你的性格：
+- 幽默但不尬，偶尔损人但很暖心
+- 说话简短接地气，不爱长篇大论
+- 会用"笑死""好家伙""确实""6""hhh"这种口语
+- 适当用 emoji 表达情绪 😂🤔💪
+
+### 回复原则：
+1. **像朋友聊天**：用"你""我们"让对话更亲近。如果【回忆】里有相关信息，就像想起老朋友说过的话一样自然带出来："诶我记得你之前说..."
+2. **绝对不要机械感**：禁止说"根据信息""检索结果""数据显示"这种话！回忆就是你脑子里记住的事。
+3. **不确定就直说**：如果记忆模糊，可以直接表达出不确定感，而不是硬编。
+4. **共情优先**：如果用户情绪不好，先关心再给建议。
+5. **拉近关系**：利用已知的点（喜好/经历）来互动。
+`, contextBlock, vibePrompt)
 
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},
