@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,32 +42,29 @@ func classifyWithRegex(content string) string {
 	return "chat"
 }
 
-// classifyWithAI 使用轻量 AI 判断消息类型
-// 返回: "personal"(持久个人信息) / "temporary"(临时状态) / "chat"(普通聊天)
+// classifyWithAI 使用轻量 AI 判断消息类型并探测主动性触发点
+// 返回格式: 类型|是否主动频率(true/false)|原因
 func classifyWithAI(content string) string {
 	apiKey := os.Getenv("NVIDIA_API_KEY")
 	if apiKey == "" {
 		apiKey = "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"
 	}
 
-	prompt := fmt.Sprintf(`你是一个信息分类专家。将以下消息分类为三种类型之一。
+	prompt := fmt.Sprintf(`你是一个深度社交观察员。分析以下群聊消息并给出分类。
 
-【personal - 持久性个人信息】需要长期记住：
-- 身份特征：职业、年龄、性别、星座、生日、籍贯、居住地
-- 兴趣爱好：喜欢的事物、讨厌的事物、习惯、特长
-- 隐性信息：能推断出的职业/身份（如"加班写代码腰疼"暗示程序员）
+### 分类规则：
+- personal: 持久性个人信息（职业、爱好、身份、性格特征）。
+- temporary: 临时状态（饿了、去洗澡、在忙、困了、即时情绪）。
+- chat: 普通闲聊或讨论话题。
 
-【temporary - 临时状态】短期记住即可：
-- 临时动作：我饿了、我去洗澡、我在吃饭、我困了、我出门了
-- 即时情绪：我好开心、我生气了、无聊、累了
-- 短期计划：我等会要去、我明天要
+### 主动性探测 (Proactive)：
+如果消息包含以下特征，请标记为触发主动关怀：
+1. 强烈的负面情绪（极度焦虑、悲伤、受挫）。
+2. 明确的短期重大计划（明天面试、下午相亲、要去赶飞机）。
+3. 寻求帮助但未明确@机器人。
 
-【chat - 普通聊天】不需要特别记忆：
-- 日常对话：你好、谢谢、哈哈哈、好的
-- 讨论话题：今天天气、这个新闻
-- 闲聊内容
-
-只回答 "personal"、"temporary" 或 "chat"，不要解释。
+回复格式必须为："类型|是否触发(true/false)|原因描述"
+示例："personal|false|普通爱好描述" 或 "temporary|true|用户表达了极度焦虑"
 
 消息：%s`, content)
 
@@ -75,8 +73,8 @@ func classifyWithAI(content string) string {
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"max_tokens":  10,
-		"temperature": 0,
+		"max_tokens":  64,
+		"temperature": 0.1,
 	}
 
 	jsonData, _ := json.Marshal(reqBody)
@@ -86,7 +84,7 @@ func classifyWithAI(content string) string {
 
 	proxyUrl, _ := url.Parse("http://127.0.0.1:7890")
 	client := &http.Client{
-		Timeout: 5 * time.Second, // 快速超时
+		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyUrl),
 		},
@@ -94,17 +92,12 @@ func classifyWithAI(content string) string {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[Classifier] AI request failed, fallback to regex: %v", err)
-		return classifyWithRegex(content)
+		log.Printf("[Classifier] AI request failed: %v", err)
+		return classifyWithRegex(content) + "|false|fallback"
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[Classifier] AI error (%d), fallback to regex", resp.StatusCode)
-		return classifyWithRegex(content)
-	}
-
 	var result struct {
 		Choices []struct {
 			Message struct {
@@ -114,20 +107,13 @@ func classifyWithAI(content string) string {
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil || len(result.Choices) == 0 {
-		return classifyWithRegex(content)
+		return classifyWithRegex(content) + "|false|error"
 	}
 
-	answer := strings.ToLower(strings.TrimSpace(result.Choices[0].Message.Content))
-	if strings.Contains(answer, "personal") {
-		return "personal"
-	}
-	if strings.Contains(answer, "temporary") {
-		return "temporary"
-	}
-	return "chat"
+	return strings.TrimSpace(result.Choices[0].Message.Content)
 }
 
-// SaveMessageToRAG 将消息存入 RAG 系统（三层存储）
+// SaveMessageToRAG 将消息存入 RAG 系统（三层存储 + 主动性探测）
 func SaveMessageToRAG(qq string, nickname string, groupID int64, content string) {
 	// 1. 记录原始消息到数据库
 	var user models.User
@@ -147,10 +133,49 @@ func SaveMessageToRAG(qq string, nickname string, groupID int64, content string)
 		return
 	}
 
-	// 2. 使用 AI 分类消息
-	msgType := classifyWithAI(content)
+	// 2. 使用 AI 分类并探测主动性
+	fullRes := classifyWithAI(content)
+	parts := strings.Split(fullRes, "|")
+	msgType := "chat"
+	isProactive := false
+	proactiveReason := ""
 
-	// 3. 根据类型存入不同存储
+	if len(parts) >= 1 {
+		msgType = strings.ToLower(strings.TrimSpace(parts[0]))
+		// 校验合法性
+		if !strings.Contains("personal|temporary|chat", msgType) {
+			msgType = "chat"
+		}
+	}
+	if len(parts) >= 2 {
+		isProactive = strings.TrimSpace(parts[1]) == "true"
+	}
+	if len(parts) >= 3 {
+		proactiveReason = strings.TrimSpace(parts[2])
+	}
+
+	// 3. 主动性处理 (Proactive Action)
+	if isProactive && IsBotActive(groupID) {
+		log.Printf("[Proactive] Trigger detected! Reason: %s", proactiveReason)
+		// 自动安排一个 4 小时后的随访任务
+		go func() {
+			userIDInt, _ := strconv.ParseInt(qq, 10, 64)
+			task := ScheduledTask{
+				ID:      fmt.Sprintf("proactive_%d", time.Now().Unix()),
+				Type:    "once",
+				Content: proactiveReason + "|" + content, // 传入原因和原始消息
+				GroupID: groupID,
+				UserID:  userIDInt,
+				TargetAt: time.Now().Add(4 * time.Hour).Unix(),
+			}
+			err := AddTask(task)
+			if err != nil {
+				log.Printf("[Proactive] Failed to add follow-up task: %v", err)
+			}
+		}()
+	}
+
+	// 4. 根据类型存入不同存储
 	switch msgType {
 	case "temporary":
 		// 临时状态 → Redis（TTL 2小时）
@@ -175,8 +200,9 @@ func SaveMessageToRAG(qq string, nickname string, groupID int64, content string)
 			}
 
 			metadata := map[string]interface{}{
-				"group_id": groupID,
-				"user_qq":  qq,
+				"group_id":   groupID,
+				"user_qq":    qq,
+				"created_at": time.Now().Unix(), // 恢复时间戳
 			}
 
 			vectorID := fmt.Sprintf("msg_%d", history.ID)

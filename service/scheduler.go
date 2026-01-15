@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"gin-bot/database"
@@ -101,7 +102,21 @@ func startZSetPoll() {
 
 			// 执行并移除
 			if GlobalSender != nil {
-				GlobalSender(t.GroupID, t.UserID, "【闹钟提醒】"+t.Content)
+				content := t.Content
+				// 检查是否为主动随访任务
+				if strings.HasPrefix(t.ID, "proactive_") {
+					// 调用 AI 生成关怀回复
+					reply, err := GetProactiveCareReply(t.Content, t.GroupID)
+					if err == nil && reply != "" {
+						content = reply
+					} else {
+						// Fallback: 实在不行就不发了，或者发个简洁的
+						content = "记得你说今天有事，一切还顺利吗？"
+					}
+					GlobalSender(t.GroupID, t.UserID, content)
+				} else {
+					GlobalSender(t.GroupID, t.UserID, "【闹钟提醒】"+content)
+				}
 			}
 			database.RDB.ZRem(ctx, ZSetKey, val)
 		}

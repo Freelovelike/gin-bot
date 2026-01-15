@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gin-bot/database"
@@ -53,7 +54,11 @@ func main() {
 	service.InitScheduler(func(groupID int64, userID int64, content string) {
 		zero.RangeBot(func(id int64, ctx *zero.Ctx) bool {
 			if groupID != 0 {
-				ctx.SendGroupMessage(groupID, content)
+				msg := content
+				if userID != 0 {
+					msg = "[CQ:at,qq=" + strconv.FormatInt(userID, 10) + "] " + msg
+				}
+				ctx.SendGroupMessage(groupID, msg)
 			} else {
 				ctx.SendPrivateMessage(userID, content)
 			}
@@ -73,27 +78,31 @@ func main() {
 		ctx.Send("Hello World!")
 	})
 
+	// 冷却时间记录：groupID -> 上次主动发言时间
+	proactiveCooldown := make(map[int64]time.Time)
+
 	// RAG 核心：统一消息处理器
 	zero.OnMessage().Handle(func(ctx *zero.Ctx) {
 		content := ctx.Event.RawMessage
 		selfIDStr := strconv.FormatInt(ctx.Event.SelfID, 10)
 		atMe := strings.Contains(content, "[CQ:at,qq="+selfIDStr+"]") || ctx.Event.MessageType == "private"
 		groupID := ctx.Event.GroupID
+		userID := ctx.Event.UserID
+		nickname := ctx.Event.Sender.NickName
+		if nickname == "" {
+			nickname = "未知用户"
+		}
 
-		// 1. 如果是艾特机器人或私聊，则进入 AI 回复流程
+		// 1. 如果是艾特机器人或私聊，则进入常规 AI 回复流程
 		if atMe {
 			isSuperUser := zero.SuperUserPermission(ctx)
-
-			// 检查机器人是否在本群开启（私聊始终开启）
 			if ctx.Event.MessageType != "private" && !service.IsBotActive(groupID) {
-				// 机器人已关闭，只有 SuperUser 才能操作（用于开启机器人）
 				if !isSuperUser {
-					return // 普通用户直接忽略
+					return
 				}
 			}
 
 			prompt := strings.TrimSpace(content)
-			// 移除艾特 CQ 码
 			prompt = strings.ReplaceAll(prompt, "[CQ:at,qq="+selfIDStr+"]", "")
 			prompt = strings.TrimSpace(prompt)
 
@@ -104,57 +113,55 @@ func main() {
 				return
 			}
 
-			// 异步请求 AI (带 Function Calling)
-			userID := ctx.Event.UserID
 			isPrivate := ctx.Event.MessageType == "private"
 			go func() {
 				reply, err := service.GetAIResponseWithFC(prompt, groupID, isSuperUser)
 				if err != nil {
 					log.Printf("[Chat] AI Response Error: %v", err)
-					// 只有开启状态才回复错误
 					if service.IsBotActive(groupID) {
 						ctx.Send("抱歉，我的大脑暂时断网了...")
 					}
 					return
 				}
-
-				// 清理 AI 回复中可能存在的 CQ 码（防止艾特错人）
 				reply = cleanCQCodes(reply)
-
-				// 群聊时艾特原始提问者
 				if !isPrivate {
 					reply = "[CQ:at,qq=" + strconv.FormatInt(userID, 10) + "] " + reply
 				}
-
 				ctx.Send(reply)
 			}()
+		} else if ctx.Event.MessageType == "group" && service.IsBotActive(groupID) {
+			// 2. 主动插嘴逻辑 (Proactive Interjection)
+			// 只有清理完内容后长度足够的才考虑
+			if !hasMeaningfulContent(content) {
+				return
+			}
 
-			// 艾特的消息通常很有价值，建议也进入归档，所以这里不 return
+			// 冷却检查：同一群聊 5 分钟内最多主动插嘴一次
+			if lastTime, ok := proactiveCooldown[groupID]; ok && time.Since(lastTime) < 5*time.Minute {
+				// 虽然不插嘴，但还是要把消息存入 RAG（在后面统一处理）
+			} else {
+				// 尝试获取主动回复
+				go func() {
+					// 这个函数会内部判断 RAG 匹配分和语义触发
+					reply, shouldReply := service.GetProactiveResponse(content, groupID)
+					if shouldReply && reply != "" {
+						proactiveCooldown[groupID] = time.Now()
+						ctx.Send(cleanCQCodes(reply))
+					}
+				}()
+			}
 		}
 
-		// 2. 基础过滤：日常聊天归档到 RAG
-		// 使用字符数（非字节数）判断，并清理 CQ 码后再判断
-		if !hasMeaningfulContent(content) {
+		// 3. 归档到 RAG（包含消息过滤）
+		if !hasMeaningfulContent(content) || content[0] == '/' {
 			return
 		}
-		if content[0] == '/' {
-			return // 忽略指令
-		}
-
-		// 3. 身份识别
-		nickname := ctx.Event.Sender.NickName
-		if nickname == "" {
-			nickname = "未知用户"
-		}
-
-		// 4. 检查 RAG 是否开启
 		if !service.IsRAGEnabled(groupID) {
 			return
 		}
 
-		// 5. 归档到 RAG
 		go service.SaveMessageToRAG(
-			strconv.FormatInt(ctx.Event.UserID, 10),
+			strconv.FormatInt(userID, 10),
 			nickname,
 			groupID,
 			content,
